@@ -1,0 +1,239 @@
+pip install Flask Flask-SQLAlchemy Flask-WTF Flask-Login Flask-Uploads
+
+import os
+
+class Config:
+    SECRET_KEY = os.urandom(24)
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///social_media.db'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    UPLOAD_FOLDER = 'static/uploads'
+    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4'}
+
+
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+from flask_login import UserMixin
+
+db = SQLAlchemy()
+
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), nullable=False, unique=True)
+    email = db.Column(db.String(150), nullable=False, unique=True)
+    password = db.Column(db.String(200), nullable=False)
+    profile_picture = db.Column(db.String(100), nullable=True)
+    bio = db.Column(db.Text, nullable=True)
+
+class Post(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    content = db.Column(db.Text, nullable=False)
+    image = db.Column(db.String(100), nullable=True)
+    video = db.Column(db.String(100), nullable=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    user = db.relationship('User', backref='posts', lazy=True)
+    likes = db.relationship('Like', backref='post', lazy=True)
+    comments = db.relationship('Comment', backref='post', lazy=True)
+
+class Comment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    content = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'))
+
+class Like(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'))
+
+class Follower(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    follower_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    followed_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+
+
+
+from flask import Flask
+from models import db
+from config import Config
+from flask_login import LoginManager
+
+app = Flask(__name__)
+app.config.from_object(Config)
+
+# Initialize the database and login manager
+db.init_app(app)
+login_manager = LoginManager(app)
+
+from routes import *
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()  # Create tables
+    app.run(debug=True)
+
+
+from flask import render_template, redirect, url_for, flash, request, session
+from models import User, Post, Comment, Like, Follower, db
+from flask_login import current_user, login_user, logout_user, login_required
+from forms import RegistrationForm, LoginForm, PostForm, CommentForm
+from app import app
+import os
+
+# Home route displaying posts
+@app.route('/')
+@login_required
+def index():
+    posts = Post.query.order_by(Post.timestamp.desc()).all()
+    return render_template('index.html', posts=posts)
+
+# Profile route
+@app.route('/profile/<username>')
+@login_required
+def profile(username):
+    user = User.query.filter_by(username=username).first_or_404()
+    return render_template('profile.html', user=user)
+
+# Create a new post
+@app.route('/create_post', methods=['GET', 'POST'])
+@login_required
+def create_post():
+    form = PostForm()
+    if form.validate_on_submit():
+        post = Post(content=form.content.data, user_id=current_user.id)
+        
+        # Handle image upload
+        if form.image.data:
+            image_file = save_image(form.image.data)
+            post.image = image_file
+        
+        db.session.add(post)
+        db.session.commit()
+        flash('Post created successfully!', 'success')
+        return redirect(url_for('index'))
+    return render_template('create_post.html', form=form)
+
+# Comment on a post
+@app.route('/comment/<int:post_id>', methods=['POST'])
+@login_required
+def comment(post_id):
+    form = CommentForm()
+    if form.validate_on_submit():
+        comment = Comment(content=form.content.data, user_id=current_user.id, post_id=post_id)
+        db.session.add(comment)
+        db.session.commit()
+        flash('Comment added successfully!', 'success')
+    return redirect(url_for('index'))
+
+# Like a post
+@app.route('/like/<int:post_id>')
+@login_required
+def like_post(post_id):
+    like = Like(user_id=current_user.id, post_id=post_id)
+    db.session.add(like)
+    db.session.commit()
+    flash('You liked the post!', 'success')
+    return redirect(url_for('index'))
+
+# Follow a user
+@app.route('/follow/<int:user_id>')
+@login_required
+def follow(user_id):
+    follow = Follower(follower_id=current_user.id, followed_id=user_id)
+    db.session.add(follow)
+    db.session.commit()
+    flash('You followed the user!', 'success')
+    return redirect(url_for('profile', username=User.query.get(user_id).username))
+
+# Save uploaded image
+def save_image(image_file):
+    filename = image_file.filename
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    image_file.save(filepath)
+    return filename
+
+
+from flask_wtf import FlaskForm
+from wtforms import StringField, TextAreaField, PasswordField, SubmitField, FileField
+from wtforms.validators import DataRequired, Length, Email
+
+class RegistrationForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired(), Length(min=2, max=20)])
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Register')
+
+class LoginForm(FlaskForm):
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Login')
+
+class PostForm(FlaskForm):
+    content = TextAreaField('Content', validators=[DataRequired()])
+    image = FileField('Image')
+    submit = SubmitField('Post')
+
+class CommentForm(FlaskForm):
+    content = TextAreaField('Content', validators=[DataRequired()])
+    submit = SubmitField('Comment')
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Social Media Feed</title>
+</head>
+<body>
+    <h1>Welcome to the Social Media Feed</h1>
+    {% for post in posts %}
+        <div class="post">
+            <p><strong>{{ post.user.username }}</strong></p>
+            <p>{{ post.content }}</p>
+            {% if post.image %}
+                <img src="{{ url_for('static', filename='uploads/' + post.image) }}" alt="Post image" width="200">
+            {% endif %}
+            <form action="{{ url_for('like_post', post_id=post.id) }}" method="POST">
+                <button type="submit">Like</button>
+            </form>
+            <form action="{{ url_for('comment', post_id=post.id) }}" method="POST">
+                <textarea name="comment_content" required></textarea>
+                <button type="submit">Comment</button>
+            </form>
+        </div>
+    {% endfor %}
+</body>
+</html>
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ user.username }}'s Profile</title>
+</head>
+<body>
+    <h1>{{ user.username }}'s Profile</h1>
+    <p>{{ user.bio }}</p>
+    <img src="{{ url_for('static', filename='uploads/' + user.profile_picture) }}" alt="Profile picture" width="150">
+    
+    {% if user != current_user %}
+        <form action="{{ url_for('follow', user_id=user.id) }}" method="POST">
+            <button type="submit">Follow</button>
+        </form>
+    {% endif %}
+    
+    <h2>Posts:</h2>
+    {% for post in user.posts %}
+        <div class="post">
+            <p>{{ post.content }}</p>
+            {% if post.image %}
+                <img src="{{ url_for('static', filename='uploads/' + post.image) }}" alt="Post image" width="200">
+            {% endif %}
+        </div>
+    {% endfor %}
+</body>
+</html>
+
